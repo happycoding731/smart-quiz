@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>智能题库 · 带导入导出</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #f1f5f9; font-family: system-ui, 'Segoe UI', sans-serif; padding: 20px; }
+        .container { max-width: 1300px; margin: 0 auto; }
+        .header { background: white; border-radius: 28px; padding: 20px 28px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        h1 { font-size: 1.8rem; margin-bottom: 8px; }
+        .toolbar { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0 8px; align-items: center; }
+        .btn { background: white; border: 1px solid #cbd5e1; padding: 6px 16px; border-radius: 40px; cursor: pointer; font-size: 0.85rem; transition: 0.2s; }
+        .btn-primary { background: #3b82f6; border-color: #3b82f6; color: white; }
+        .btn-primary:hover { background: #2563eb; }
+        .dashboard { display: flex; gap: 24px; flex-wrap: wrap; }
+        .panel { background: white; border-radius: 28px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); flex: 1; min-width: 280px; }
+        .quiz-panel { flex: 1.2; }
+        .question-list { max-height: 500px; overflow-y: auto; margin-top: 12px; }
+        .question-item { border-bottom: 1px solid #eef2f8; padding: 12px; cursor: pointer; }
+        .question-item:hover { background: #f8fafc; }
+        .badge { background: #eef2ff; padding: 2px 10px; border-radius: 30px; font-size: 0.7rem; margin-left: 8px; }
+        .quiz-question { font-size: 1.3rem; font-weight: 500; margin-bottom: 20px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+        .interactive-area { background: #f9fafb; border-radius: 24px; padding: 20px; margin: 20px 0; }
+        .feedback { background: #f1f5f9; border-radius: 20px; padding: 12px; margin-top: 16px; }
+        .btn-group { display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+        footer { text-align: center; margin-top: 32px; color: #6c7a91; font-size: 0.75rem; }
+        img { max-width: 100%; border-radius: 12px; margin: 8px 0; }
+        .option-row { margin: 8px 0; }
+        .filter-select { padding: 6px 12px; border-radius: 40px; border: 1px solid #cbd5e1; background: white; font-size: 0.85rem; }
+        .draw-answer { background: #fef9e3; padding: 16px; border-radius: 20px; text-align: center; }
+        .draw-answer img { max-width: 100%; max-height: 500px; object-fit: contain; margin: 8px auto; display: block; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>📚 智能题库（可导入/导出）</h1>
+        <p>支持判断/单选/画图题 | 自动解析答案 | 按题型抽题 | 图片自动修复</p>
+        <div class="toolbar">
+            <label class="btn">📂 导入题库 (JSON)
+                <input type="file" id="importFile" accept=".json" style="display: none;">
+            </label>
+            <button id="exportBtn" class="btn">💾 导出题库</button>
+            <button id="clearBtn" class="btn">🗑️ 清空所有</button>
+            <select id="typeFilter" class="filter-select">
+                <option value="all">📚 全部题型</option>
+                <option value="judge">✅ 判断题</option>
+                <option value="single">🔘 单选题</option>
+                <option value="draw">🎨 画图题</option>
+            </select>
+            <span id="totalCount" class="badge">0 题</span>
+        </div>
+    </div>
+    <div class="dashboard">
+        <div class="panel">
+            <h3>📖 题目列表</h3>
+            <div id="questionList" class="question-list">加载中...</div>
+        </div>
+        <div class="panel quiz-panel">
+            <h3>🎲 随机抽题器</h3>
+            <div id="quizArea">
+                <div id="quizQuestion" class="quiz-question">✨ 点击「随机抽题」开始</div>
+                <div id="interactiveZone" class="interactive-area"></div>
+                <div id="feedbackZone" class="feedback"></div>
+            </div>
+            <div class="btn-group">
+                <button id="randomBtn" class="btn btn-primary">🎲 随机抽题</button>
+                <button id="revealBtn" class="btn">🔍 显示答案</button>
+                <button id="checkBtn" class="btn">📝 核对答案</button>
+            </div>
+        </div>
+    </div>
+    <footer>提示：题目中的答案标记会自动隐藏；画图题图片若缺失前缀会自动补全。可导入/导出 JSON 备份。</footer>
+</div>
+
+<script>
+    // 全局题库变量（初始为空，从外部 JSON 加载）
+    let questions = [];
+    let currentQuestion = null;
+
+    // ========== 通用工具函数 ==========
+    function fixBase64Images(htmlString) {
+        if (typeof htmlString !== 'string') return htmlString;
+        return htmlString.replace(/src="(?!data:image)([^"]+)"/g, (match, p1) => {
+            if (/^[A-Za-z0-9+/=]+$/.test(p1) && (p1.startsWith('iVBOR') || p1.startsWith('/9j/') || p1.length > 100)) {
+                return `src="data:image/png;base64,${p1}"`;
+            }
+            return match;
+        });
+    }
+
+    function extractAnswerFromQuestion(q) {
+        const text = q.question;
+        const type = q.type;
+        if (type === 'judge') {
+            const match = text.match(/[（(]\s*([√×])\s*[）)]/);
+            if (match) return match[1] === '√' ? '正确' : '错误';
+            if (/正确/.test(text)) return '正确';
+            if (/错误/.test(text)) return '错误';
+            return '';
+        } else if (type === 'single') {
+            const match = text.match(/[（(]\s*([A-D])\s*[）)]/i);
+            if (match) {
+                const letter = match[1].toUpperCase();
+                if (q.options && q.options.length) {
+                    const idx = letter.charCodeAt(0) - 65;
+                    if (idx >= 0 && idx < q.options.length) return q.options[idx];
+                }
+                return letter;
+            }
+            return '';
+        }
+        return '';
+    }
+
+    function getCleanQuestionText(raw) {
+        let cleaned = raw.replace(/[（(]\s*[√×A-D]\s*[）)]/gi, '').trim();
+        cleaned = cleaned.replace(/^(\d+[、.])/, '$1 ');
+        cleaned = fixBase64Images(cleaned);
+        return cleaned;
+    }
+
+    function isAnswerMatch(userChoice, correctAnswer) {
+        if (!userChoice || !correctAnswer) return false;
+        if (userChoice === correctAnswer) return true;
+        if (/^[A-D]$/i.test(correctAnswer)) {
+            const letter = correctAnswer.toUpperCase();
+            if (userChoice.toUpperCase().startsWith(letter + '.') || userChoice.toUpperCase().startsWith(letter + '．')) {
+                return true;
+            }
+        }
+        if (/^[A-D]$/i.test(userChoice) && correctAnswer.toUpperCase().startsWith(userChoice.toUpperCase() + '.')) {
+            return true;
+        }
+        return userChoice.trim().toLowerCase() === correctAnswer.trim().toLowerCase();
+    }
+
+    function saveToLocal() {
+        localStorage.setItem('quizBank', JSON.stringify(questions));
+    }
+
+    function loadFromLocal() {
+        const stored = localStorage.getItem('quizBank');
+        if (stored) {
+            try {
+                questions = JSON.parse(stored);
+                return true;
+            } catch(e) { console.warn(e); }
+        }
+        return false;
+    }
+
+    // 从外部 questions.json 加载
+    async function loadQuestionsFromJson() {
+        try {
+            const response = await fetch('questions.json');
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            let data = await response.json();
+            if (Array.isArray(data)) {
+                // 预处理画图题的图片前缀
+                data = data.map(q => {
+                    if (q.type === 'draw') {
+                        if (q.question) q.question = fixBase64Images(q.question);
+                        if (q.answer) q.answer = fixBase64Images(q.answer);
+                    }
+                    return q;
+                });
+                questions = data;
+                saveToLocal(); // 缓存到 localStorage
+                renderList();
+                updateCount();
+                clearQuizDisplay();
+                console.log(`✅ 成功加载 ${questions.length} 道题目`);
+            } else {
+                throw new Error('JSON 格式错误，应为数组');
+            }
+        } catch (err) {
+            console.error('加载 questions.json 失败：', err);
+            // 降级：尝试从 localStorage 读取
+            if (!loadFromLocal()) {
+                questions = [];
+                renderList();
+                updateCount();
+                clearQuizDisplay();
+                alert('题库加载失败，请检查 questions.json 是否存在或使用导入功能。');
+            } else {
+                renderList();
+                updateCount();
+                clearQuizDisplay();
+                alert('使用本地缓存题库。');
+            }
+        }
+    }
+
+    function getFilteredQuestions() {
+        const filter = typeFilter.value;
+        if (filter === 'all') return questions;
+        return questions.filter(q => q.type === filter);
+    }
+
+    function renderList() {
+        const filtered = getFilteredQuestions();
+        if (!filtered.length) {
+            questionListDiv.innerHTML = '<div style="text-align:center; padding:30px;">📭 当前题型无题目，请导入 JSON 或切换题型</div>';
+            return;
+        }
+        let html = '';
+        filtered.forEach((q, idx) => {
+            let typeLabel = q.type === 'judge' ? '✅判断' : (q.type === 'single' ? '🔘单选' : '🎨画图');
+            let clean = getCleanQuestionText(q.question);
+            let short = clean.replace(/<[^>]*>/g, '').substring(0, 60);
+            html += `<div class="question-item" data-original-index="${questions.indexOf(q)}">
+                        <div><strong>${idx+1}. ${short}</strong> <span class="badge">${typeLabel}</span></div>
+                     </div>`;
+        });
+        questionListDiv.innerHTML = html;
+        document.querySelectorAll('.question-item').forEach(el => {
+            el.addEventListener('click', () => {
+                let origIdx = parseInt(el.dataset.originalIndex);
+                if (!isNaN(origIdx)) displayQuestion(questions[origIdx]);
+            });
+        });
+    }
+
+    function displayQuestion(q) {
+        currentQuestion = JSON.parse(JSON.stringify(q));
+        let displayText = getCleanQuestionText(currentQuestion.question);
+        if (currentQuestion.type === 'draw' && currentQuestion.question.includes('<img')) {
+            displayText = fixBase64Images(currentQuestion.question);
+        }
+        quizQuestionDiv.innerHTML = displayText;
+        renderInteractive(currentQuestion);
+        feedbackZone.innerHTML = '';
+    }
+
+    function renderInteractive(q) {
+        interactiveZone.innerHTML = '';
+        if (q.type === 'judge') {
+            interactiveZone.innerHTML = `<button class="btn" id="judgeTrue">✔️ 正确</button> <button class="btn" id="judgeFalse">❌ 错误</button>`;
+            document.getElementById('judgeTrue').onclick = () => { interactiveZone.__userAns = '正确'; feedbackZone.innerHTML = '<span>✅ 已选择：正确</span>'; };
+            document.getElementById('judgeFalse').onclick = () => { interactiveZone.__userAns = '错误'; feedbackZone.innerHTML = '<span>❌ 已选择：错误</span>'; };
+        } else if (q.type === 'single') {
+            let opts = q.options || [];
+            if (!opts.length) {
+                interactiveZone.innerHTML = '<div>⚠️ 该题未提供选项列表，请根据题目内容选择。</div>';
+                return;
+            }
+            let radios = '';
+            opts.forEach((opt, i) => {
+                radios += `<div class="option-row"><label><input type="radio" name="singleOpt" value="${opt.replace(/"/g, '&quot;')}"> ${opt}</label></div>`;
+            });
+            interactiveZone.innerHTML = radios;
+        } else if (q.type === 'draw') {
+            interactiveZone.innerHTML = '<div>🎨 画图题答案请点击「显示答案」查看。</div>';
+        }
+    }
+
+    function checkAnswer() {
+        if (!currentQuestion) { alert("请先随机抽题"); return; }
+        const q = currentQuestion;
+        if (q.type === 'judge') {
+            const user = interactiveZone.__userAns;
+            if (!user) { feedbackZone.innerHTML = '<span style="color:red;">请先选择正确/错误</span>'; return; }
+            const correct = extractAnswerFromQuestion(q);
+            const ok = (user === correct);
+            feedbackZone.innerHTML = ok ? '<span style="color:green;">✅ 回答正确！</span>' : `<span style="color:red;">❌ 错误！正确答案：${correct}</span>`;
+        } else if (q.type === 'single') {
+            const selected = document.querySelector('input[name="singleOpt"]:checked');
+            if (!selected) { feedbackZone.innerHTML = '<span style="color:red;">请选择一个选项</span>'; return; }
+            const userChoice = selected.value;
+            const correctAnswer = extractAnswerFromQuestion(q);
+            const ok = isAnswerMatch(userChoice, correctAnswer);
+            feedbackZone.innerHTML = ok ? '<span style="color:green;">✅ 正确！</span>' : `<span style="color:red;">❌ 错误！正确答案：${correctAnswer}</span>`;
+        } else {
+            feedbackZone.innerHTML = '<span>📌 画图题请点击「显示答案」查看。</span>';
+        }
+    }
+
+    function revealAnswer() {
+        if (!currentQuestion) { alert("请先随机抽题"); return; }
+        let ans = currentQuestion.answer;
+        if (!ans && currentQuestion.type !== 'draw') {
+            ans = extractAnswerFromQuestion(currentQuestion);
+        }
+        if (!ans) {
+            feedbackZone.innerHTML = '<div><strong>参考答案：</strong><br>未提供答案。</div>';
+            return;
+        }
+        ans = fixBase64Images(ans);
+        if (currentQuestion.type === 'draw') {
+            let html = '<div class="draw-answer"><strong>📐 画图题参考：</strong><br>';
+            if (ans.startsWith('data:image') || ans.includes('<img')) {
+                html += ans;
+            } else {
+                html += `<div style="white-space:pre-wrap;">${ans}</div>`;
+            }
+            html += '</div>';
+            feedbackZone.innerHTML = html;
+        } else {
+            feedbackZone.innerHTML = `<div><strong>参考答案：</strong><br>${ans}</div>`;
+        }
+    }
+
+    function randomPick() {
+        const filtered = getFilteredQuestions();
+        if (!filtered.length) {
+            alert(`没有「${typeFilter.options[typeFilter.selectedIndex].text}」的题目，请换一个题型或导入 JSON。`);
+            return;
+        }
+        const idx = Math.floor(Math.random() * filtered.length);
+        displayQuestion(filtered[idx]);
+    }
+
+    function importJSON(file) {
+        const reader = new FileReader();
+        reader.onload = e => {
+            try {
+                let data = JSON.parse(e.target.result);
+                if (Array.isArray(data)) {
+                    data = data.map(q => {
+                        if (q.type === 'draw') {
+                            if (q.question) q.question = fixBase64Images(q.question);
+                            if (q.answer) q.answer = fixBase64Images(q.answer);
+                        }
+                        return q;
+                    });
+                    questions = data;
+                    renderList();
+                    updateCount();
+                    saveToLocal();
+                    clearQuizDisplay();
+                    alert(`✅ 导入成功！共 ${questions.length} 道题。`);
+                } else throw new Error("格式错误");
+            } catch(err) { alert("解析失败：" + err.message); }
+        };
+        reader.readAsText(file, "UTF-8");
+    }
+
+    function exportCurrent() {
+        if (!questions.length) { alert("无题目可导出"); return; }
+        const dataStr = JSON.stringify(questions, null, 2);
+        const blob = new Blob([dataStr], {type: "application/json"});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `题库_${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+
+    function clearAll() {
+        if (confirm("清空所有题目？")) {
+            questions = [];
+            renderList();
+            updateCount();
+            saveToLocal();
+            clearQuizDisplay();
+        }
+    }
+
+    function clearQuizDisplay() {
+        currentQuestion = null;
+        quizQuestionDiv.innerHTML = '✨ 点击「随机抽题」开始练习';
+        interactiveZone.innerHTML = '';
+        feedbackZone.innerHTML = '';
+    }
+
+    function updateCount() {
+        const filtered = getFilteredQuestions();
+        totalCountSpan.innerText = `${filtered.length} / ${questions.length} 题`;
+    }
+
+    // DOM 元素
+    const importFileInput = document.getElementById('importFile');
+    const exportBtn = document.getElementById('exportBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const randomBtn = document.getElementById('randomBtn');
+    const revealBtn = document.getElementById('revealBtn');
+    const checkBtn = document.getElementById('checkBtn');
+    const quizQuestionDiv = document.getElementById('quizQuestion');
+    const interactiveZone = document.getElementById('interactiveZone');
+    const feedbackZone = document.getElementById('feedbackZone');
+    const questionListDiv = document.getElementById('questionList');
+    const totalCountSpan = document.getElementById('totalCount');
+    const typeFilter = document.getElementById('typeFilter');
+
+    typeFilter.addEventListener('change', () => {
+        renderList();
+        updateCount();
+        clearQuizDisplay();
+    });
+
+    importFileInput.addEventListener('change', e => {
+        if (e.target.files.length) importJSON(e.target.files[0]);
+        e.target.value = '';
+    });
+    exportBtn.addEventListener('click', exportCurrent);
+    clearBtn.addEventListener('click', clearAll);
+    randomBtn.addEventListener('click', randomPick);
+    revealBtn.addEventListener('click', revealAnswer);
+    checkBtn.addEventListener('click', checkAnswer);
+
+    // 初始化：优先加载外部 JSON，失败则尝试 localStorage
+    loadQuestionsFromJson();
+</script>
+</body>
+</html>
